@@ -240,7 +240,7 @@ def process_folder(tree: dict, folder_id, path: list[str]):
 
 
 def get_drive_client() -> pydrive2.drive.GoogleDrive:
-    gauth = pydrive2.auth.GoogleAuth(settings_file='settings.yaml')
+    gauth = pydrive2.auth.GoogleAuth(settings_file="settings.yaml")
 
     gauth.GetFlow()
     gauth.flow.params.update({"access_type": "offline"})

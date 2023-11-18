@@ -13,6 +13,7 @@ tenacity = "*"
 [tool.poetry.group.dev.dependencies]
 pdbpp = "*"
 ruff = "*"
+pre-commit = "^3.5.0"
 
 [build-system]
 requires = ["poetry-core"]

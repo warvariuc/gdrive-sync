@@ -25,12 +25,12 @@ Configure Oauth consent screen:
 ![](docs/consent_screen_user_type.png)
 ![](docs/consent_screen_scopes.png)
 
-Add the email of the user whose Google Drive you want to access/sync
+Add the email of the user whose Google Drive you want to access/sync:
 
 ![](docs/consent_screen_test_users.png)
 
 
-Create access credentials
+Create access credentials:
 
 ![](docs/create_credentials.png)
 ![](docs/create_oauth_client.png)
@@ -72,14 +72,14 @@ In case you get in the terminal this API error
     Enable it by visiting https://console.developers.google.com/apis/api/drive.googleapis.com/overview... 
     ...
 
-Follow the link to allow the project to user Google Drive API.
+Follow the link to allow the project to use Google Drive API.
 
 Then you will see "The authentication flow has completed." You can close the page now, the console
 app has been granted access to download files from Google Drive.
 
 Once you log in through OAuth allowing the app to access your Google Drive, the session details
 are stored in `credentials.json` file. So when you run the script next time, it will reuse the session
-unitl it expires.
+until it expires.
 
 To use a different browser where you are logged in to the traget account, use something like:
 
