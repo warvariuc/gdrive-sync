@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "gdrivesync"
+version = "0.1.0"
+description = ""
+authors = ["Victor Varvaryuk <victor.varvariuc@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+PyDrive2 = "*"
+tenacity = "*"
+
+[tool.poetry.group.dev.dependencies]
+pdbpp = "*"
+black = "*"
+ruff = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
