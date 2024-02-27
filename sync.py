@@ -2,7 +2,6 @@ import collections
 import datetime
 import logging.config
 import os
-import os.path
 import pathlib
 import shutil
 from typing import TypeAlias
@@ -165,13 +164,11 @@ def process_file(obj: RemoteObj, dir_path: pathlib.Path, file_names: set[str]) -
     """Download a Google Drive file to the specified directory.
 
     Args:
-    ----
         obj: GDrive file structure
         dir_path: the current remote directory path
         file_names: names of fiels already synced in this directory
 
     Returns:
-    -------
         str: path to the downloaded file
     """
     logger.info(
@@ -237,7 +234,6 @@ def process_folder(tree: dict[str, TreeNode], folder_id, path: list[str]):
     """Recursively sync files and directories from the given remote folder to a local folder.
 
     Args:
-    ----
         tree: The whole remote directory tree (flattened)
         folder_id:
         path:

@@ -47,3 +47,18 @@ ignore = [
 [tool.ruff.isort]
 order-by-type = false
 lines-after-imports = 2
+
+[tool.ruff.flake8-import-conventions]
+# Declare the banned `from` imports.
+banned-from = [
+  "copy",
+  "datetime",
+  "functools",
+  "itertools",
+  "random",
+  "sys",
+  "unittest.mock",
+  "uuid",
+  # third-party
+  "pydantic",
+]
