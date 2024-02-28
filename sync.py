@@ -76,6 +76,11 @@ class RemoteParentFolder(pydantic.BaseModel):
     is_root: bool = pydantic.Field(validation_alias="isRoot")
 
 
+class LocalInfo(pydantic.BaseModel):
+    dst_mime_type: str | None  # download locally as this type...
+    file_name: str
+
+
 class RemoteObj(pydantic.BaseModel):
     """Remote file or folder. A wrapper around GoogleDriveFile."""
 
@@ -88,24 +93,53 @@ class RemoteObj(pydantic.BaseModel):
     modified_date: datetime.datetime = pydantic.Field(validation_alias="modifiedDate")
     parents: list[RemoteParentFolder]
     gdrive_file: pydrive2.files.GoogleDriveFile
+    local_info: LocalInfo | None = None
 
-    def human_readable_size(self, decimal_places=2):
+    def human_readable_size(self, decimal_places=2) -> str:
         size = self.file_size
+        if size is None:
+            return "? B"
         for unit in ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]:
             if size < 1024.0 or unit == "PiB":  # noqa: PLR2004
                 break
             size /= 1024.0
         return f"{size:.{decimal_places}f} {unit}"
 
-
-class TreeNodeFiles(pydantic.RootModel):
-    root: list[RemoteObj]
+    @property
+    def dst_info(self):
+        dst_mime_type, dst_ext = MIMETYPES.get(self.mime_type, (None, None))
+        return dst_mime_type, dst_ext
 
 
 class TreeNode(pydantic.BaseModel):
     title: str = ""
     folders: list[str] = []  # IDs
-    files: TreeNodeFiles = []
+    files: list[RemoteObj] = []
+
+    def _sanitize_file_name(self, file_name: str, dst_ext: str, file_names_seen: set[str]) -> str:
+        """Convert unacceptable filesystem chars to hyphens and add postfixes to duplicate file
+        names to make them unique."""
+        file_name = file_name.replace("/", "_")
+        dst_ext = f".{dst_ext}" if dst_ext else ""
+        while True:
+            _file_name = file_name + dst_ext
+            if _file_name not in file_names_seen:
+                return _file_name
+            file_name += " (1)"
+
+    def make_local_file_info(self):
+        """Make local filesystem info for files in a folder"""
+        # There can be several files with the same name in a directory
+        # Sort by name, then by date, then add postfix `(1)` to an existing file name
+        # Google Drive for Desktop also does this, from what I see
+        self.files.sort(key=lambda obj: (obj.title, obj.modified_date, obj.id))
+
+        file_names_seen: set[str] = set()
+        for obj in self.files:
+            dst_mime_type, dst_ext = MIMETYPES.get(obj.mime_type, (None, None))
+            file_name = self._sanitize_file_name(obj.title, dst_ext, file_names_seen)
+            file_names_seen.add(file_name)
+            obj.local_info = LocalInfo(dst_mime_type=dst_mime_type, file_name=file_name)
 
 
 Tree: TypeAlias = collections.defaultdict[str, TreeNode]
@@ -160,77 +194,56 @@ def download_file(obj: RemoteObj, file_path: pathlib.Path, mime_type: str):
     obj.gdrive_file.GetContentFile(str(file_path), mimetype=mime_type)
 
 
-def process_file(obj: RemoteObj, dir_path: pathlib.Path, file_names: set[str]) -> str:
+def process_file(obj: RemoteObj, dir_path: pathlib.Path):
     """Download a Google Drive file to the specified directory.
 
     Args:
         obj: GDrive file structure
         dir_path: the current remote directory path
-        file_names: names of fiels already synced in this directory
-
-    Returns:
-        str: path to the downloaded file
     """
+    file_path = dir_path / obj.local_info.file_name
     logger.info(
-        "Syncing file: %s (%s, %s %s)",
-        obj.title,
+        "Syncing file\n %s\n%s, %s %s",
+        file_path,
         obj.human_readable_size(),
         obj.mime_type,
         obj.id,
     )
-
-    dst_mime_type, dst_ext = MIMETYPES.get(obj.mime_type, (None, None))
-
-    # TODO: do not pass file_names and dir_path here
-    # add "_local" key to `file` with {"file_path": ..., "mime_type": ...}
-    file_name = sanitize_file_name(obj.title, dst_ext, file_names)
-    file_path = dir_path / file_name
 
     remote_mod_time = obj.modified_date.timestamp()
 
     if file_path.exists():
         local_mod_time = file_path.stat().st_mtime
         if local_mod_time == remote_mod_time:
-            logger.debug("File exists with the same timestamp. Skipping.")
-            return file_name
+            logger.info("File exists with the same timestamp. Skipping.")
+            return file_path
+        logger.info("File exists with a different timestamp.")
 
     logger.info(
-        "Downloading %s%s.",
+        "Downloading\n%s%s.",
         file_path,
-        "" if not dst_mime_type else f" (as {dst_mime_type})",
+        "" if not obj.local_info.dst_mime_type else f"\n(as {obj.local_info.dst_mime_type})",
     )
-    download_file(obj, file_path, dst_mime_type)
+    download_file(obj, file_path, obj.local_info.dst_mime_type)
 
     # Set local file timestamp
     os.utime(file_path, (remote_mod_time, remote_mod_time))
 
-    return file_name
 
-
-def delete_removed_files(dir_path: pathlib.Path, all_file_names: set[str]):
+def delete_removed_files(dir_path: pathlib.Path, file_names_seen: set[str]):
     """Walk over the existing files on disk, and delete the ones, which are not on remote."""
-    for file_name in os.listdir(dir_path):
-        if file_name in all_file_names:
+    for file_path in dir_path.iterdir():
+        if file_path.name in file_names_seen:
             continue
-        file_path = dir_path / file_name
         if file_path.is_dir():
-            logger.info("Removing directory %s", file_path)
+            logger.info("Removing directory\n%s", file_path)
             shutil.rmtree(file_path)
         else:
-            logger.info("Removing file %s", file_path)
+            logger.info("Removing file\n%s", file_path)
             file_path.unlink()
 
 
-def sanitize_file_name(file_name: str, dst_ext: str, all_file_names: set[str]):
-    file_name = file_name.replace("/", "_")
-    dst_ext = f".{dst_ext}" if dst_ext else ""
-    while (file_name + dst_ext) in all_file_names:
-        file_name += " (1)"
-    file_name += dst_ext
-    return file_name
-
-
-def process_folder(tree: dict[str, TreeNode], folder_id, path: list[str]):
+def process_folder(tree: dict[str, TreeNode], folder_id, path: list[str]) -> str:
     """Recursively sync files and directories from the given remote folder to a local folder.
 
     Args:
@@ -240,25 +253,23 @@ def process_folder(tree: dict[str, TreeNode], folder_id, path: list[str]):
     """
     node = tree[folder_id]
     path.append(node.title)
-    logger.info("Syncing folder %s", " / ".join(path))
+    logger.info("Syncing folder\n%s", " / ".join(path))
 
+    # TODO: make dir configurable
     dir_path = pathlib.Path("gdrive").joinpath(*path)
     dir_path.mkdir(exist_ok=True)
 
-    # There can be several files with the same name in a directory
-    # Sort by name, then by date, then add postfix `(1)` to an existing file name
-    # Google Drive for Desktop also does this, from what I see
-    node.files.sort(key=lambda obj: (obj.title, obj.modified_date, obj.id))
-    file_names = set()  # processed files in the current directory
-    for file in node.files:
-        file_name = process_file(file, dir_path, file_names)
-        file_names.add(file_name)
+    node.make_local_file_info()
+    file_names_seen: set[str] = set()  # processed files in the current directory
+    for obj in node.files:
+        process_file(obj, dir_path)
+        file_names_seen.add(obj.local_info.file_name)
 
     for folder_id in node.folders:
         folder_name = process_folder(tree, folder_id, path)
-        file_names.add(folder_name)
+        file_names_seen.add(folder_name)
 
-    delete_removed_files(dir_path, file_names)
+    delete_removed_files(dir_path, file_names_seen)
 
     path.pop()
     return node.title

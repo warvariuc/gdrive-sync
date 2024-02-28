@@ -42,6 +42,7 @@ ignore = [
     "EM", # flake8-errmsg
     "TRY003", # Avoid specifying long messages outside the exception class
     "TRY002", # Create your own exception
+    "RET503", # Missing explicit `return` at the end of function
 ]
 
 [tool.ruff.isort]
