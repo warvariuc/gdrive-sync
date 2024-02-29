@@ -4,6 +4,7 @@ import logging.config
 import os
 import pathlib
 import shutil
+import subprocess
 from typing import Annotated, TypeAlias
 
 import click
@@ -60,6 +61,16 @@ MIMETYPES = {
 }
 
 
+def human_readable_size(size: int, decimal_places: int = 2) -> str:
+    if size is None:
+        return "? B"
+    for unit in ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]:
+        if size < 1024.0 or unit == "PiB":  # noqa: PLR2004
+            break
+        size /= 1024.0
+    return f"{size:.{decimal_places}f} {unit}"
+
+
 class Stats(pydantic.BaseModel):
     total_file_count: int = 0
     total_folder_count: int = 0
@@ -77,8 +88,10 @@ class RemoteParentFolder(pydantic.BaseModel):
 
 
 class LocalInfo(pydantic.BaseModel):
-    dst_mime_type: str | None  # download locally as this type...
+    dir_path: pathlib.Path
+    mime_type: str | None  # download locally as this type...
     file_name: str
+    archive_file_name: str | None
 
 
 class RemoteObj(pydantic.BaseModel):
@@ -94,16 +107,6 @@ class RemoteObj(pydantic.BaseModel):
     parents: list[RemoteParentFolder]
     gdrive_file: pydrive2.files.GoogleDriveFile
     local_info: LocalInfo | None = None
-
-    def human_readable_size(self, decimal_places=2) -> str:
-        size = self.file_size
-        if size is None:
-            return "? B"
-        for unit in ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]:
-            if size < 1024.0 or unit == "PiB":  # noqa: PLR2004
-                break
-            size /= 1024.0
-        return f"{size:.{decimal_places}f} {unit}"
 
     @property
     def dst_info(self):
@@ -127,7 +130,7 @@ class TreeNode(pydantic.BaseModel):
                 return _file_name
             file_name += " (1)"
 
-    def make_local_file_info(self):
+    def make_local_file_info(self, dir_path: pathlib.Path, archive: bool):
         """Make local filesystem info for files in a folder"""
         # There can be several files with the same name in a directory
         # Sort by name, then by date, then add postfix `(1)` to an existing file name
@@ -139,7 +142,13 @@ class TreeNode(pydantic.BaseModel):
             dst_mime_type, dst_ext = MIMETYPES.get(obj.mime_type, (None, None))
             file_name = self._sanitize_file_name(obj.title, dst_ext, file_names_seen)
             file_names_seen.add(file_name)
-            obj.local_info = LocalInfo(dst_mime_type=dst_mime_type, file_name=file_name)
+            archive_file_name = f"{file_name}.zip" if archive else None
+            obj.local_info = LocalInfo(
+                dir_path=dir_path,
+                mime_type=dst_mime_type,
+                file_name=file_name,
+                archive_file_name=archive_file_name,
+            )
 
 
 Tree: TypeAlias = collections.defaultdict[
@@ -156,6 +165,8 @@ class Syncer(pydantic.BaseModel):
     root_folder_id: str
     base_dir: pathlib.Path
     stats: Stats
+    archive: bool
+    password: str | None
 
     @tenacity.retry(
         retry=tenacity.retry_if_exception_type(Exception),
@@ -164,41 +175,70 @@ class Syncer(pydantic.BaseModel):
         before_sleep=tenacity.before_sleep_log(logger, logging.INFO),
         reraise=True,
     )
-    def download_file(self, obj: RemoteObj, file_path: pathlib.Path, mime_type: str):
-        # TODO: save the file encrypted
-        obj.gdrive_file.GetContentFile(str(file_path), mimetype=mime_type)
+    def download_file(self, obj: RemoteObj, file_path: pathlib.Path):
+        logger.info(
+            "Downloading\n%s%s.",
+            file_path,
+            "" if not obj.local_info.mime_type else f"\n(as {obj.local_info.mime_type})",
+        )
+        obj.gdrive_file.GetContentFile(str(file_path), mimetype=obj.local_info.mime_type)
 
-    def sync_file(self, obj: RemoteObj, dir_path: pathlib.Path):
-        """Download a Google Drive file to the specified directory.
+        self.stats.synced_file_count += 1
 
-        Args:
-            obj: GDrive file structure
-            dir_path: the current remote directory path
-        """
-        file_path = dir_path / obj.local_info.file_name
+        if not self.archive:
+            return file_path
+        return self.archive_file(file_path)
+
+    def archive_file(self, file_path: pathlib.Path) -> pathlib.Path:
+        """Archive the file, optionally with a password."""
+        zip_path = file_path.with_name(file_path.name + ".zip")
+        command = ["7z", "a"]
+        if self.password:
+            command.append(f"-p{self.password}")
+        command.extend(["-y", zip_path, file_path])
+
+        logger.debug("Archiving")
+        output = subprocess.check_output(command)  # noqa: S603
+        logger.debug("%s", output)
+
+        file_path.unlink()
+
+        return zip_path
+
+    def check_file_synced(self, obj: RemoteObj):
+        remote_mod_time = obj.modified_date.timestamp()
+        file_name = obj.local_info.archive_file_name or obj.local_info.file_name
+        file_path = obj.local_info.dir_path / file_name
+
+        if not file_path.exists():
+            return False
+
+        local_mod_time = file_path.stat().st_mtime
+        if local_mod_time == remote_mod_time:
+            logger.info("File exists with the same timestamp. Skipping.")
+            self.stats.skipped_file_count += 1
+            return True
+
+        logger.info("File exists with a different timestamp.")
+        return False
+
+    def sync_file(self, obj: RemoteObj):
+        """Download a Google Drive file to the specified directory."""
+        file_path = obj.local_info.dir_path / obj.local_info.file_name
         logger.info(
             "Syncing file\n %s\n%s, %s %s",
             file_path,
-            obj.human_readable_size(),
+            human_readable_size(obj.file_size),
             obj.mime_type,
             obj.id,
         )
 
         remote_mod_time = obj.modified_date.timestamp()
 
-        if file_path.exists():
-            local_mod_time = file_path.stat().st_mtime
-            if local_mod_time == remote_mod_time:
-                logger.info("File exists with the same timestamp. Skipping.")
-                return file_path
-            logger.info("File exists with a different timestamp.")
+        if self.check_file_synced(obj):
+            return file_path
 
-        logger.info(
-            "Downloading\n%s%s.",
-            file_path,
-            "" if not obj.local_info.dst_mime_type else f"\n(as {obj.local_info.dst_mime_type})",
-        )
-        self.download_file(obj, file_path, obj.local_info.dst_mime_type)
+        file_path = self.download_file(obj, file_path)
 
         # Set local file timestamp
         os.utime(file_path, (remote_mod_time, remote_mod_time))
@@ -213,6 +253,8 @@ class Syncer(pydantic.BaseModel):
                 shutil.rmtree(file_path)
             else:
                 logger.info("Removing file\n%s", file_path)
+                self.stats.deleted_file_count += 1
+                self.stats.deleted_file_size += file_path.stat().st_size
                 file_path.unlink()
 
     def sync_folder(self, folder_id, path: list[str]) -> str:
@@ -224,20 +266,24 @@ class Syncer(pydantic.BaseModel):
         dir_path = self.base_dir.joinpath(*path)
         dir_path.mkdir(exist_ok=True)
 
-        node.make_local_file_info()
+        node.make_local_file_info(dir_path, archive=self.archive)
         file_names_seen: set[str] = set()  # processed files in the current directory
         for obj in node.files:
-            self.sync_file(obj, dir_path)
-            file_names_seen.add(obj.local_info.file_name)
+            self.sync_file(obj)
+            file_names_seen.add(obj.local_info.archive_file_name or obj.local_info.file_name)
 
         for folder_id in node.folders:
             folder_name = self.sync_folder(folder_id, path)
             file_names_seen.add(folder_name)
 
+        # Delete files which have been removed on remote
         self.delete_removed_files(dir_path, file_names_seen)
 
         path.pop()
         return node.title
+
+    def sync(self):
+        self.sync_folder(self.root_folder_id, [])
 
 
 def get_all_remote_objs(drive: pydrive2.drive.GoogleDrive) -> list[RemoteObj]:
@@ -246,7 +292,13 @@ def get_all_remote_objs(drive: pydrive2.drive.GoogleDrive) -> list[RemoteObj]:
     return [RemoteObj(gdrive_file=file, **file) for file in all_files]
 
 
-def get_tree(drive: pydrive2.drive.GoogleDrive, base_dir: pathlib.Path) -> Syncer:
+def get_tree(
+    drive: pydrive2.drive.GoogleDrive,
+    *,
+    base_dir: pathlib.Path,
+    archive: bool,
+    password: str,
+) -> Syncer:
     all_objs = get_all_remote_objs(drive)
 
     stats = Stats()
@@ -267,6 +319,7 @@ def get_tree(drive: pydrive2.drive.GoogleDrive, base_dir: pathlib.Path) -> Synce
         else:
             tree[parent.id].files.append(obj)
             stats.total_file_count += 1
+            stats.total_file_size += obj.file_size or 0
 
     logger.info(
         "%s files and %s folders found on remote.",
@@ -274,7 +327,14 @@ def get_tree(drive: pydrive2.drive.GoogleDrive, base_dir: pathlib.Path) -> Synce
         stats.total_folder_count,
     )
 
-    return Syncer(stats=stats, tree=tree, root_folder_id=root_folder_id, base_dir=base_dir)
+    return Syncer(
+        stats=stats,
+        tree=tree,
+        root_folder_id=root_folder_id,
+        base_dir=base_dir,
+        archive=bool(archive or password),
+        password=password,
+    )
 
 
 def get_drive_client() -> pydrive2.drive.GoogleDrive:
@@ -300,16 +360,24 @@ def get_drive_client() -> pydrive2.drive.GoogleDrive:
 
 @click.command(context_settings={"show_default": True})
 @click.option("--browser", default=None, help="Path to a non-default browser to use for auth")
-@click.option("--dir", "base_dir", default="~/Downloads/gdrive", help="Where to sync the files")
-def main(browser: str | None, base_dir: str):
+@click.option("--dir", "base_dir", default="~/Downloads/gdrive", help="Where to save the files")
+@click.option("--archive", type=bool, default=True, help="Archive each file")
+# @click.option(
+#     "--password",
+#     prompt=True,
+#     default=lambda: os.environ.get("PASSWORD", ""),
+#     hide_input=True,
+#     help="Password for file archives",
+# )
+def main(*, browser: str | None, base_dir: str, archive: bool, password: str = "password"):
     if browser:
         os.environ["BROWSER"] = browser
 
     drive = get_drive_client()
     logger.info("Base dir: %s", base_dir)
     base_dir = pathlib.Path(base_dir).expanduser()
-    syncer = get_tree(drive, base_dir)
-    syncer.sync_folder(syncer.root_folder_id, [])
+    syncer = get_tree(drive, base_dir=base_dir, archive=archive, password=password)
+    syncer.sync()
     logger.info("Stats: %s", syncer.stats)
 
 
