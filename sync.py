@@ -4,7 +4,6 @@ import logging.config
 import os
 import pathlib
 import shutil
-import subprocess
 from typing import Annotated, TypeAlias
 
 import click
@@ -12,8 +11,11 @@ import pydantic
 import pydrive2.auth
 import pydrive2.drive
 import pydrive2.files
+import pyzipper
 import tenacity
 
+
+DEFAULT_BASE_DIR = "~/Documents/gdrive"
 
 logging.config.dictConfig(
     {
@@ -75,8 +77,8 @@ class Stats(pydantic.BaseModel):
     total_file_count: int = 0
     total_folder_count: int = 0
     total_file_size: int = 0
-    synced_file_count: int = 0
-    synced_file_size: int = 0
+    downloaded_file_count: int = 0
+    downloaded_file_size: int = 0
     skipped_file_count: int = 0
     deleted_file_count: int = 0
     deleted_file_size: int = 0
@@ -183,7 +185,8 @@ class Syncer(pydantic.BaseModel):
         )
         obj.gdrive_file.GetContentFile(str(file_path), mimetype=obj.local_info.mime_type)
 
-        self.stats.synced_file_count += 1
+        self.stats.downloaded_file_count += 1
+        self.stats.downloaded_file_size += file_path.stat().st_size
 
         if not self.archive:
             return file_path
@@ -192,14 +195,13 @@ class Syncer(pydantic.BaseModel):
     def archive_file(self, file_path: pathlib.Path) -> pathlib.Path:
         """Archive the file, optionally with a password."""
         zip_path = file_path.with_name(file_path.name + ".zip")
-        command = ["7z", "a"]
-        if self.password:
-            command.append(f"-p{self.password}")
-        command.extend(["-y", zip_path, file_path])
 
         logger.debug("Archiving")
-        output = subprocess.check_output(command)  # noqa: S603
-        logger.debug("%s", output)
+        with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_LZMA) as zf:
+            if self.password:
+                zf.setpassword(self.password.encode())
+                zf.setencryption(pyzipper.WZ_AES, nbits=256)
+            zf.write(file_path, arcname=file_path.name)
 
         file_path.unlink()
 
@@ -360,18 +362,22 @@ def get_drive_client() -> pydrive2.drive.GoogleDrive:
 
 @click.command(context_settings={"show_default": True})
 @click.option("--browser", default=None, help="Path to a non-default browser to use for auth")
-@click.option("--dir", "base_dir", default="~/Downloads/gdrive", help="Where to save the files")
+@click.option("--dir", "base_dir", default=DEFAULT_BASE_DIR, help="Where to save the files")
 @click.option("--archive", type=bool, default=True, help="Archive each file")
-# @click.option(
-#     "--password",
-#     prompt=True,
-#     default=lambda: os.environ.get("PASSWORD", ""),
-#     hide_input=True,
-#     help="Password for file archives",
-# )
-def main(*, browser: str | None, base_dir: str, archive: bool, password: str = "password"):
+@click.option(
+    "--password",
+    default=None,
+    help="Optional password for file archives (implies archiving). If you pass an empty string, "
+    "the password will be requested from the terminal.",
+)
+def main(*, browser: str | None, base_dir: str, archive: bool, password: str | None):
     if browser:
         os.environ["BROWSER"] = browser
+
+    if (_password := os.environ.get("PASSWORD")) is not None:
+        password = _password
+    if password == "":
+        password = click.prompt("Enter password for the new archives", hide_input=True)
 
     drive = get_drive_client()
     logger.info("Base dir: %s", base_dir)
