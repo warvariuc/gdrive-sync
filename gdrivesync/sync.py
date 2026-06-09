@@ -1,10 +1,10 @@
 import collections
-import datetime
+import datetime  # noqa: TC003
 import logging.config
 import os
 import pathlib
 import shutil
-from typing import Annotated, TypeAlias
+from typing import Annotated
 
 import click
 import pydantic
@@ -80,12 +80,13 @@ class Stats(pydantic.BaseModel):
     downloaded_file_count: int = 0
     downloaded_file_size: int = 0
     skipped_file_count: int = 0
+    failed_file_count: int = 0
     deleted_file_count: int = 0
     deleted_file_size: int = 0
 
 
 class RemoteParentFolder(pydantic.BaseModel):
-    id: str  # noqa: A003
+    id: str
     is_root: bool = pydantic.Field(validation_alias="isRoot")
 
 
@@ -101,7 +102,7 @@ class RemoteObj(pydantic.BaseModel):
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
-    id: str  # noqa: A003
+    id: str
     title: str
     mime_type: str = pydantic.Field(validation_alias="mimeType")
     file_size: int | None = pydantic.Field(default=None, validation_alias="fileSize")
@@ -153,7 +154,7 @@ class TreeNode(pydantic.BaseModel):
             )
 
 
-Tree: TypeAlias = collections.defaultdict[
+type Tree = collections.defaultdict[
     str,
     Annotated[TreeNode, pydantic.Field(default_factory=TreeNode)],
 ]
@@ -177,13 +178,20 @@ class Syncer(pydantic.BaseModel):
         before_sleep=tenacity.before_sleep_log(logger, logging.INFO),
         reraise=True,
     )
-    def download_file(self, obj: RemoteObj, file_path: pathlib.Path):
+    def download_file(self, obj: RemoteObj, file_path: pathlib.Path) -> pathlib.Path | None:
         logger.info(
             "Downloading\n%s%s.",
             file_path,
             "" if not obj.local_info.mime_type else f"\n(as {obj.local_info.mime_type})",
         )
-        obj.gdrive_file.GetContentFile(str(file_path), mimetype=obj.local_info.mime_type)
+        try:
+            obj.gdrive_file.GetContentFile(str(file_path), mimetype=obj.local_info.mime_type)
+        except pydrive2.files.ApiRequestError as exc:
+            if exc.error.get("message") == "This file is too large to be exported.":
+                logger.info("This file is too large to be exported. Ignoring.")
+                self.stats.failed_file_count += 1
+                return None
+            raise
 
         self.stats.downloaded_file_count += 1
         self.stats.downloaded_file_size += file_path.stat().st_size
@@ -242,6 +250,9 @@ class Syncer(pydantic.BaseModel):
 
         file_path = self.download_file(obj, file_path)
 
+        if file_path is None:
+            return None
+
         # Set local file timestamp
         os.utime(file_path, (remote_mod_time, remote_mod_time))
 
@@ -274,8 +285,8 @@ class Syncer(pydantic.BaseModel):
             self.sync_file(obj)
             file_names_seen.add(obj.local_info.archive_file_name or obj.local_info.file_name)
 
-        for folder_id in node.folders:
-            folder_name = self.sync_folder(folder_id, path)
+        for nested_folder_id in node.folders:
+            folder_name = self.sync_folder(nested_folder_id, path)
             file_names_seen.add(folder_name)
 
         # Delete files which have been removed on remote
@@ -351,8 +362,11 @@ def get_drive_client() -> pydrive2.drive.GoogleDrive:
         gauth.LocalWebserverAuth()
     except pydrive2.auth.RefreshError as exc:
         if "Access token refresh failed" in str(exc):
-            raise Exception("Try to delete credentials.json") from exc
-        raise
+            logger.info("Access token refresh failed. Deleting credentials.json and retrying.")
+            pathlib.Path("credentials.json").unlink()
+            gauth.LocalWebserverAuth()
+        else:
+            raise
 
     try:
         return pydrive2.drive.GoogleDrive(gauth)
@@ -385,7 +399,3 @@ def main(*, browser: str | None, base_dir: str, archive: bool, password: str | N
     syncer = get_tree(drive, base_dir=base_dir, archive=archive, password=password)
     syncer.sync()
     logger.info("Stats: %s", syncer.stats)
-
-
-if __name__ == "__main__":
-    main()

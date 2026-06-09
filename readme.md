@@ -48,12 +48,11 @@ Rename the file to `client_secrets.json` and place it in the project root direct
 
 Create Python virtual enviroment, install the requirements:
 
-    python3.11 -m venv .venv
-    poetry install
+    uv run sync
 
 Run the app:
     
-    poetry run python sync.py
+    uv run python sync.py
 
 This will open the default browser and the Google logged in user is asked to permit the app to 
 access Google Drive. The user should be test user which was configured to be used with the project
