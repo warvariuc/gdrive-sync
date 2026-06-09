@@ -58,11 +58,11 @@ ignore = [
     "FBT001", # Boolean-typed positional argument in function definition
 ]
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 order-by-type = false
 lines-after-imports = 2
 
-[tool.ruff.flake8-import-conventions]
+[tool.ruff.lint.flake8-import-conventions]
 # Declare the banned `from` imports.
 banned-from = [
   "copy",

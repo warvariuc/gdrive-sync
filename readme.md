@@ -82,4 +82,8 @@ until it expires.
 
 To use a different browser where you are logged in to the traget account, use something like:
 
-    poetry run python sync.py --browser="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+    uv run sync --browser="/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+
+To disable archiving/zipping:
+
+    uv run sync --archive=no

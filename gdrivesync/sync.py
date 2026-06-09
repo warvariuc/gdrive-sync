@@ -63,14 +63,14 @@ MIMETYPES = {
 }
 
 
-def human_readable_size(size: int, decimal_places: int = 2) -> str:
+def human_readable_size(size: float, decimal_places: int = 2) -> str:
     if size is None:
         return "? B"
     for unit in ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]:
         if size < 1024.0 or unit == "PiB":  # noqa: PLR2004
             break
         size /= 1024.0
-    return f"{size:.{decimal_places}f} {unit}"
+    return f"{size:.{decimal_places}f} {unit}"  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 class Stats(pydantic.BaseModel):
@@ -92,9 +92,9 @@ class RemoteParentFolder(pydantic.BaseModel):
 
 class LocalInfo(pydantic.BaseModel):
     dir_path: pathlib.Path
-    mime_type: str | None  # download locally as this type...
+    mime_type: str  # download locally as this type...
     file_name: str
-    archive_file_name: str | None
+    archive_file_name: str
 
 
 class RemoteObj(pydantic.BaseModel):
@@ -105,7 +105,7 @@ class RemoteObj(pydantic.BaseModel):
     id: str
     title: str
     mime_type: str = pydantic.Field(validation_alias="mimeType")
-    file_size: int | None = pydantic.Field(default=None, validation_alias="fileSize")
+    file_size: int = pydantic.Field(default=0, validation_alias="fileSize")
     modified_date: datetime.datetime = pydantic.Field(validation_alias="modifiedDate")
     parents: list[RemoteParentFolder]
     gdrive_file: pydrive2.files.GoogleDriveFile
@@ -142,10 +142,10 @@ class TreeNode(pydantic.BaseModel):
 
         file_names_seen: set[str] = set()
         for obj in self.files:
-            dst_mime_type, dst_ext = MIMETYPES.get(obj.mime_type, (None, None))
+            dst_mime_type, dst_ext = MIMETYPES.get(obj.mime_type, ("", ""))
             file_name = self._sanitize_file_name(obj.title, dst_ext, file_names_seen)
             file_names_seen.add(file_name)
-            archive_file_name = f"{file_name}.zip" if archive else None
+            archive_file_name = f"{file_name}.zip" if archive else ""
             obj.local_info = LocalInfo(
                 dir_path=dir_path,
                 mime_type=dst_mime_type,
@@ -179,6 +179,7 @@ class Syncer(pydantic.BaseModel):
         reraise=True,
     )
     def download_file(self, obj: RemoteObj, file_path: pathlib.Path) -> pathlib.Path | None:
+        assert obj.local_info is not None
         logger.info(
             "Downloading\n%s%s.",
             file_path,
@@ -216,6 +217,7 @@ class Syncer(pydantic.BaseModel):
         return zip_path
 
     def check_file_synced(self, obj: RemoteObj):
+        assert obj.local_info is not None
         remote_mod_time = obj.modified_date.timestamp()
         file_name = obj.local_info.archive_file_name or obj.local_info.file_name
         file_path = obj.local_info.dir_path / file_name
@@ -234,6 +236,7 @@ class Syncer(pydantic.BaseModel):
 
     def sync_file(self, obj: RemoteObj):
         """Download a Google Drive file to the specified directory."""
+        assert obj.local_info is not None
         file_path = obj.local_info.dir_path / obj.local_info.file_name
         logger.info(
             "Syncing file\n %s\n%s, %s %s",
@@ -283,6 +286,7 @@ class Syncer(pydantic.BaseModel):
         file_names_seen: set[str] = set()  # processed files in the current directory
         for obj in node.files:
             self.sync_file(obj)
+            assert obj.local_info is not None
             file_names_seen.add(obj.local_info.archive_file_name or obj.local_info.file_name)
 
         for nested_folder_id in node.folders:
@@ -317,7 +321,7 @@ def get_tree(
     stats = Stats()
     # the keys are folder ids
     tree: Tree = collections.defaultdict(TreeNode)
-    root_folder_id = None
+    root_folder_id = ""
     for obj in all_objs:
         if len(obj.parents) == 0:
             continue
@@ -384,7 +388,7 @@ def get_drive_client() -> pydrive2.drive.GoogleDrive:
     help="Optional password for file archives (implies archiving). If you pass an empty string, "
     "the password will be requested from the terminal.",
 )
-def main(*, browser: str | None, base_dir: str, archive: bool, password: str | None):
+def main(*, browser: str | None, base_dir: str | pathlib.Path, archive: bool, password: str | None):
     if browser:
         os.environ["BROWSER"] = browser
 
@@ -394,8 +398,12 @@ def main(*, browser: str | None, base_dir: str, archive: bool, password: str | N
         password = click.prompt("Enter password for the new archives", hide_input=True)
 
     drive = get_drive_client()
-    logger.info("Base dir: %s", base_dir)
+
     base_dir = pathlib.Path(base_dir).expanduser()
+    logger.info("Base dir: %s", base_dir)
+
+    assert password is not None
     syncer = get_tree(drive, base_dir=base_dir, archive=archive, password=password)
     syncer.sync()
+
     logger.info("Stats: %s", syncer.stats)
