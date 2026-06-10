@@ -199,13 +199,14 @@ class Syncer(pydantic.BaseModel):
 
         if not self.archive:
             return file_path
+
         return self.archive_file(file_path)
 
     def archive_file(self, file_path: pathlib.Path) -> pathlib.Path:
         """Archive the file, optionally with a password."""
         zip_path = file_path.with_name(file_path.name + ".zip")
 
-        logger.debug("Archiving")
+        logger.debug("Archiving %s -> %s", file_path, zip_path)
         with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_LZMA) as zf:
             if self.password:
                 zf.setpassword(self.password.encode())
@@ -314,7 +315,7 @@ def get_tree(
     *,
     base_dir: pathlib.Path,
     archive: bool,
-    password: str,
+    password: str | None,
 ) -> Syncer:
     all_objs = get_all_remote_objs(drive)
 
@@ -402,7 +403,6 @@ def main(*, browser: str | None, base_dir: str | pathlib.Path, archive: bool, pa
     base_dir = pathlib.Path(base_dir).expanduser()
     logger.info("Base dir: %s", base_dir)
 
-    assert password is not None
     syncer = get_tree(drive, base_dir=base_dir, archive=archive, password=password)
     syncer.sync()
 
